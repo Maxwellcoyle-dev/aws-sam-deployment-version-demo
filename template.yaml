@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  versioning-test
+
+  Sample SAM Template for sam-env-versioning-test
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 20
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: The environment name (dev, prod, etc.)
+    Default: dev
+  TableName:
+    Type: String
+    Description: Name of the DynamoDB Table
+    Default: VersionTable
+  BucketName:
+    Type: String
+    Description: Name of the S3 Bucket
+    Default: version-bucket
+
+Resources:
+  VersionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TableName}-${EnvironmentName}"
+      AttributeDefinitions:
+        - AttributeName: versionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: versionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  VersionBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${BucketName}-${EnvironmentName}"
+
+  VersionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "VersionQueue-${EnvironmentName}"
+      VisibilityTimeout: 600 # Set this to a higher value than your Lambda timeout
+      ReceiveMessageWaitTimeSeconds: 20 # Long polling
+      DelaySeconds: 30 # Delay before processing messages
+
+  ProducerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ProducerFunction-${EnvironmentName}"
+      Handler: app.handler
+      Runtime: nodejs20.x
+      CodeUri: functions/producer/
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          PROJECT_REGION: us-east-2
+          DYNAMODB_TABLE: !Ref VersionTable
+          SQS_QUEUE_URL: !Ref VersionQueue
+      Events:
+        VersionTestingProducer:
+          Type: Api
+          Properties:
+            Path: /producer/
+            Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VersionTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt VersionQueue.Arn
+
+  ConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ConsumerFunction-${EnvironmentName}"
+      Handler: app.handler
+      Runtime: nodejs20.x
+      CodeUri: functions/consumer/
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          PROJECT_REGION: us-east-2
+          SQS_QUEUE_URL: !Ref VersionQueue
+          S3_BUCKET: !Ref VersionBucket
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt VersionQueue.Arn
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+            Resource: !GetAtt VersionQueue.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${BucketName}-${EnvironmentName}/*"
